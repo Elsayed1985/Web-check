@@ -1,0 +1,187 @@
+
+import requests
+from datetime import datetime, timedelta, timezone
+from getpass import getpass
+from google import genai
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+MODEL = "gemini-3.8-flash"
+
+def connect_gemini():
+    console.print("[green]Gemini API Authentication[/green]")
+
+    key = getpass("Enter Gemini API Key: ").strip()
+
+    if not key:
+        raise ValueError("API Key is required")
+
+    return genai.Client(api_key=key)
+
+
+def get_global_cves(limit=30):
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=7)
+
+    url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+    params = {
+        "pubStartDate": start.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "pubEndDate": now.strftime("%Y-%m-%dT%H:%M:%S.000"),
+        "resultsPerPage": limit
+    }
+
+    response = requests.get(
+        url, params=params, timeout=30
+    )
+    response.raise_for_status()
+
+    return response.json().get("vulnerabilities", [])
+
+
+def get_cisa_kev(limit=20):
+    url = (
+        "https://www.cisa.gov/sites/default/files/feeds/"
+        "known_exploited_vulnerabilities.json"
+    )
+
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+
+    items = response.json().get("vulnerabilities", [])
+
+    return sorted(
+        items,
+        key=lambda x: x.get("dateAdded", ""),
+        reverse=True
+    )[:limit]
+
+
+def show_global_intelligence():
+    console.print("\n[bold green]GLOBAL VULNERABILITY INTELLIGENCE[/bold green]")
+
+    try:
+        cves = get_global_cves()
+        kev = get_cisa_kev()
+
+        table = Table(title="LATEST GLOBAL CVEs")
+        table.add_column("CVE ID", style="cyan")
+        table.add_column("Published")
+        table.add_column("Description")
+
+        for item in cves:
+            cve = item.get("cve", {})
+            descriptions = cve.get("descriptions", [])
+
+            description = next(
+                (
+                    x["value"] for x in descriptions
+                    if x.get("lang") == "en"
+                ),
+                "No description"
+            )
+
+            table.add_row(
+                cve.get("id", "N/A"),
+                cve.get("published", "")[:10],
+                description[:100]
+            )
+
+        console.print(table)
+
+        kev_table = Table(title="CISA CONFIRMED EXPLOITED VULNERABILITIES")
+        kev_table.add_column("CVE")
+        kev_table.add_column("Product")
+        kev_table.add_column("Date Added")
+
+        for item in kev:
+            kev_table.add_row(
+                item.get("cveID", "N/A"),
+                item.get("product", "N/A"),
+                item.get("dateAdded", "N/A")
+            )
+
+        console.print(kev_table)
+
+        return cves, kev
+
+    except requests.RequestException as error:
+        console.print(f"[red]Feed Error: {error}[/red]")
+        return [], []
+
+
+def analyze_with_gemini(client, evidence):
+    prompt = f"""
+You are TITO AI, a defensive cybersecurity analyst.
+
+Analyze the following passive security assessment evidence.
+
+Rules:
+- Do not invent vulnerabilities.
+- Distinguish confirmed findings from possible findings.
+- Use UNKNOWN when evidence is insufficient.
+- Never claim a vulnerability is absent merely because
+  it was not observed.
+- Do not provide exploit instructions.
+- Give remediation recommendations.
+
+Return:
+1. Finding
+2. Status: TRUE / FALSE / UNKNOWN
+3. Severity
+4. Confidence
+5. Evidence
+6. Recommended remediation
+
+Evidence:
+{evidence}
+"""
+
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt
+    )
+
+    console.print("\n[bold cyan]TITO AI ANALYSIS[/bold cyan]")
+    console.print(response.text)
+
+
+def main():
+    client = connect_gemini()
+
+    while True:
+        console.print("""
+[bold green]
+╔══════════════════════════════════╗
+║          TITO HACK WEB           ║
+║     AI SECURITY INTELLIGENCE     ║
+╚══════════════════════════════════╝
+[/bold green]
+
+[1] Global Vulnerability Database
+[2] AI Vulnerability Analysis
+[3] Exit
+""")
+
+        choice = console.input("[cyan]TITO > [/cyan]")
+
+        if choice == "1":
+            show_global_intelligence()
+
+        elif choice == "2":
+            evidence = console.input(
+                "Enter sanitized security evidence: "
+            )
+            analyze_with_gemini(client, evidence)
+
+        elif choice == "3":
+            break
+
+        else:
+            console.print("[red]Invalid option[/red]")
+
+
+if __name__ == "__main__":
+    main()
